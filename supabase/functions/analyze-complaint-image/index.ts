@@ -69,6 +69,9 @@ Respond ONLY in JSON:
     // Use OpenRouter API with Qwen vision model
     const endpoint = "https://openrouter.ai/api/v1/chat/completions";
 
+    console.log('Calling OpenRouter API with Qwen vision model...');
+    console.log('Image data length:', base64Data.length);
+    
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
@@ -78,7 +81,7 @@ Respond ONLY in JSON:
         "X-Title": "Nagar Rakshak",
       },
       body: JSON.stringify({
-        model: "qwen/qwen-2.5-vl-7b-instruct:free",
+        model: "qwen/qwen-2.5-vl-7b-instruct",
         messages: [
           {
             role: "user",
@@ -99,9 +102,12 @@ Respond ONLY in JSON:
       }),
     });
 
+    console.log('Response status:', response.status);
+    
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`OpenRouter API error: ${response.status} ${response.statusText}`, errorText);
+      console.error(`OpenRouter API error: ${response.status} ${response.statusText}`);
+      console.error('Error body:', errorText);
       return new Response(
         JSON.stringify({
           is_relevant: false,
@@ -115,9 +121,12 @@ Respond ONLY in JSON:
     }
 
     const data = await response.json();
+    console.log('API Response:', JSON.stringify(data));
     const aiText = data?.choices?.[0]?.message?.content || "";
+    console.log('AI Text extracted:', aiText);
 
     if (!aiText) {
+      console.error('AI response was empty');
       return new Response(
         JSON.stringify({
           is_relevant: false,
@@ -168,6 +177,10 @@ Respond ONLY in JSON:
 
   } catch (error) {
     console.error("Error in analyze-complaint-image:", error);
+    if (error instanceof Error) {
+      console.error('Error message:', error.message);
+      console.error('Error stack:', error.stack);
+    }
     return new Response(
       JSON.stringify({
         is_relevant: false,
