@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -6,13 +6,10 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle, Navigation } from "lucide-react"
+import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/integrations/supabase/client"
-import { cn } from "@/lib/utils"
 import { indianStates, getCitiesByState } from "@/data/indianStatesAndCities"
-import { useRef } from "react"
 import { useLanguage } from "@/contexts/LanguageContext"
 import { createComplaintNotifications } from "../services/notificationService"
 
@@ -34,9 +31,10 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [showLocationDialog, setShowLocationDialog] = useState(false);
   const [location, setLocation] = useState<{lat: number, lng: number} | null>(null);
   const [isGettingLocation, setIsGettingLocation] = useState(false);
+  const [showManualLocationFields, setShowManualLocationFields] = useState(false);
+  const [isLocationAutoFilled, setIsLocationAutoFilled] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<BlobPart[]>([])
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
@@ -70,6 +68,157 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
 
   const states = indianStates
   const cities = formData.state ? getCitiesByState(formData.state) : []
+
+  const normalizeLocationToken = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
+
+  const resolveStateName = (candidate: string) => {
+    const normalizedCandidate = normalizeLocationToken(candidate)
+    const exactMatch = states.find((state) => normalizeLocationToken(state) === normalizedCandidate)
+    if (exactMatch) return exactMatch
+
+    return states.find((state) => {
+      const normalizedState = normalizeLocationToken(state)
+      return normalizedState.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedState)
+    }) || ''
+  }
+
+  const resolveCityName = (state: string, candidate: string) => {
+    if (!state || !candidate) return ''
+
+    const availableCities = getCitiesByState(state)
+    const normalizedCandidate = normalizeLocationToken(candidate)
+    const exactMatch = availableCities.find((city) => normalizeLocationToken(city) === normalizedCandidate)
+    if (exactMatch) return exactMatch
+
+    return availableCities.find((city) => {
+      const normalizedCity = normalizeLocationToken(city)
+      return normalizedCity.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedCity)
+    }) || ''
+  }
+
+  useEffect(() => {
+    let isMounted = true
+
+    const reverseGeocodeLocation = async (latitude: number, longitude: number) => {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`
+      )
+
+      if (!response.ok) {
+        throw new Error(`Reverse geocoding failed with status ${response.status}`)
+      }
+
+      const geocodeResult = await response.json()
+      const address = geocodeResult?.address || {}
+
+      const rawState = (address.state || address['state_district'] || '') as string
+      const resolvedState = resolveStateName(rawState)
+      const rawCity = (address.city || address.town || address.village || address.municipality || address.county || '') as string
+      const resolvedCity = resolveCityName(resolvedState, rawCity)
+      const district = (address.state_district || address.county || '') as string
+      const address1 = [address.house_number, address.road].filter(Boolean).join(', ')
+      const address2 = [address.suburb, address.neighbourhood, address.postcode].filter(Boolean).join(', ')
+
+      return {
+        resolvedState,
+        resolvedCity,
+        district,
+        address1,
+        address2,
+      }
+    }
+
+    const autoFillLocation = async () => {
+      if (!navigator.geolocation) {
+        if (!isMounted) return
+        setShowManualLocationFields(true)
+        setIsLocationAutoFilled(false)
+        toast({
+          title: "Location not supported",
+          description: "Your browser does not support location. Please fill location manually.",
+          variant: "destructive"
+        })
+        return
+      }
+
+      setIsGettingLocation(true)
+
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          if (!isMounted) return
+
+          const { latitude, longitude } = position.coords
+          setLocation({ lat: latitude, lng: longitude })
+
+          try {
+            const geocoded = await reverseGeocodeLocation(latitude, longitude)
+            if (!isMounted) return
+
+            setFormData((prev) => ({
+              ...prev,
+              state: geocoded.resolvedState || prev.state,
+              city: geocoded.resolvedCity || prev.city,
+              district: geocoded.district || prev.district,
+              address1: geocoded.address1 || prev.address1,
+              address2: geocoded.address2 || prev.address2,
+              gpsLatitude: latitude,
+              gpsLongitude: longitude,
+            }))
+
+            const hasRequiredLocation = Boolean(geocoded.resolvedState && geocoded.resolvedCity)
+            setIsLocationAutoFilled(hasRequiredLocation)
+            setShowManualLocationFields(!hasRequiredLocation)
+
+            toast({
+              title: hasRequiredLocation ? "Location auto-filled" : "Complete location manually",
+              description: hasRequiredLocation
+                ? "State and city were filled from your current location."
+                : "We got GPS coordinates but could not map full address. Please fill state and city manually.",
+              variant: hasRequiredLocation ? "default" : "destructive"
+            })
+          } catch (error) {
+            console.error('Reverse geocoding error:', error)
+            if (!isMounted) return
+
+            setFormData((prev) => ({
+              ...prev,
+              gpsLatitude: latitude,
+              gpsLongitude: longitude,
+            }))
+            setIsLocationAutoFilled(false)
+            setShowManualLocationFields(true)
+            toast({
+              title: "Could not auto-fill address",
+              description: "GPS was captured but address lookup failed. Please fill location manually.",
+              variant: "destructive"
+            })
+          } finally {
+            if (isMounted) setIsGettingLocation(false)
+          }
+        },
+        (error) => {
+          console.error('Geolocation error:', error)
+          if (!isMounted) return
+
+          setIsGettingLocation(false)
+          setIsLocationAutoFilled(false)
+          setShowManualLocationFields(true)
+          toast({
+            title: "Location permission needed",
+            description: "Please allow location access, or fill location manually below.",
+            variant: "destructive"
+          })
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+      )
+    }
+
+    autoFillLocation()
+
+    return () => {
+      isMounted = false
+    }
+  }, [toast])
 
   const mapAuthorityForIssue = (issue: string): string | null => {
     const normalized = (issue || '').toLowerCase()
@@ -132,7 +281,6 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
             
             if (data.is_relevant) {
                 setFormData(prev => ({ ...prev, description: data.description }));
-                setShowLocationDialog(true);
                 toast({
                     title: "Image Analyzed Successfully",
                     description: "An AI-generated description has been added.",
@@ -150,10 +298,9 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
             console.error('Error analyzing image:', err);
             toast({
                 title: "AI Analysis Failed",
-                description: "AI service is unreachable. Run 'npm run backend:ts' or configure VITE_AI_ANALYSIS_ENDPOINT. You can still type description manually and submit.",
+            description: "AI service is unreachable right now. You can still type description manually and submit.",
                 variant: "destructive"
             });
-            setShowLocationDialog(true);
         } finally {
             setIsAnalyzing(false);
         }
@@ -191,42 +338,6 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     }
   }
 
-  const getCurrentLocation = () => {
-    if (!navigator.geolocation) {
-      toast({ title: "Geolocation not supported", variant: "destructive" });
-      return;
-    }
-    setIsGettingLocation(true);
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        const { latitude, longitude } = position.coords;
-        setLocation({ lat: latitude, lng: longitude });
-        setFormData(prev => ({ 
-          ...prev, 
-          gpsLatitude: latitude, 
-          gpsLongitude: longitude 
-        }));
-        setIsGettingLocation(false);
-        setShowLocationDialog(false);
-        toast({ title: "Location captured successfully!" });
-      },
-      (error) => {
-        console.error('Geolocation error:', error);
-        toast({ 
-          title: "Location access denied", 
-          description: "Please enable location access or enter manually",
-          variant: "destructive" 
-        });
-        setIsGettingLocation(false);
-      },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
-    );
-  }
-
-  const skipLocation = () => {
-    setShowLocationDialog(false);
-  }
-
   const handleSubmit = async () => {
     if (!formData.media) {
         toast({
@@ -236,10 +347,19 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
         })
         return
       }
-    if (!formData.state || !formData.city || !formData.issueType || !formData.description) {
+    if (!formData.issueType || !formData.description) {
         toast({
           title: "Missing Information",
-          description: "Please fill all required fields",
+          description: "Please fill issue type and description",
+          variant: "destructive"
+        })
+        return
+      }
+    if (!formData.state || !formData.city) {
+        setShowManualLocationFields(true)
+        toast({
+          title: "Location Required",
+          description: "We could not auto-fill full location. Please fill state and city manually.",
           variant: "destructive"
         })
         return
@@ -440,61 +560,87 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                   </SelectContent>
                 </Select>
               </div>
-              <div>
-                <Label htmlFor="state">{t('complaint.state')} *</Label>
-                <Select value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value, city: ''}))}>
-                  <SelectTrigger id="state">
-                    <SelectValue placeholder="Select your state" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {states.map(state => (
-                      <SelectItem key={state} value={state}>{state}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div className="rounded-md border border-civic-saffron/20 bg-civic-saffron/5 p-3 text-sm">
+                <p className="font-medium text-foreground">Location</p>
+                {isGettingLocation ? (
+                  <p className="mt-1 text-muted-foreground">Fetching your location automatically...</p>
+                ) : isLocationAutoFilled ? (
+                  <p className="mt-1 text-civic-green">Auto-filled: {formData.city}, {formData.state}</p>
+                ) : (
+                  <p className="mt-1 text-muted-foreground">Could not auto-fill full location. Please fill manually below.</p>
+                )}
+                {location && (
+                  <p className="mt-1 text-xs text-muted-foreground">GPS: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}</p>
+                )}
+                <Button
+                  type="button"
+                  variant="link"
+                  className="h-auto px-0 text-civic-saffron"
+                  onClick={() => setShowManualLocationFields((prev) => !prev)}
+                >
+                  {showManualLocationFields ? 'Hide manual location fields' : 'Edit location manually'}
+                </Button>
               </div>
 
-              <div>
-                <Label htmlFor="city">{t('complaint.city')} *</Label>
-                <Select value={formData.city} onValueChange={(value) => setFormData(prev => ({...prev, city: value}))}>
-                  <SelectTrigger id="city">
-                    <SelectValue placeholder={formData.state ? "Select your city" : "Select state first"} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {cities.map(city => (
-                      <SelectItem key={city} value={city}>{city}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              {showManualLocationFields && (
+                <>
+                  <div>
+                    <Label htmlFor="state">{t('complaint.state')} *</Label>
+                    <Select value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value, city: ''}))}>
+                      <SelectTrigger id="state">
+                        <SelectValue placeholder="Select your state" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {states.map(state => (
+                          <SelectItem key={state} value={state}>{state}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-              <div>
-                <Label htmlFor="district">{t('complaint.district')} ({t('action.optional')})</Label>
-                <Input
-                  id="district"
-                  placeholder="Enter district (optional)"
-                  value={formData.district}
-                  onChange={(e) => setFormData(prev => ({...prev, district: e.target.value}))}
-                />
-              </div>
-              <div>
-                <Label htmlFor="address1">{t('complaint.address1')} ({t('action.optional')})</Label>
-                <Input
-                  id="address1"
-                  placeholder="House no., Street, Landmark"
-                  value={formData.address1}
-                  onChange={(e) => setFormData(prev => ({...prev, address1: e.target.value}))}
-                />
-              </div>
-              <div>
-                <Label htmlFor="address2">{t('complaint.address2')} ({t('action.optional')})</Label>
-                <Input
-                  id="address2"
-                  placeholder="Area, Locality"
-                  value={formData.address2}
-                  onChange={(e) => setFormData(prev => ({...prev, address2: e.target.value}))}
-                />
-              </div>
+                  <div>
+                    <Label htmlFor="city">{t('complaint.city')} *</Label>
+                    <Select value={formData.city} onValueChange={(value) => setFormData(prev => ({...prev, city: value}))}>
+                      <SelectTrigger id="city">
+                        <SelectValue placeholder={formData.state ? "Select your city" : "Select state first"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {cities.map(city => (
+                          <SelectItem key={city} value={city}>{city}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div>
+                    <Label htmlFor="district">{t('complaint.district')} ({t('action.optional')})</Label>
+                    <Input
+                      id="district"
+                      placeholder="Enter district (optional)"
+                      value={formData.district}
+                      onChange={(e) => setFormData(prev => ({...prev, district: e.target.value}))}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="address1">{t('complaint.address1')} ({t('action.optional')})</Label>
+                    <Input
+                      id="address1"
+                      placeholder="House no., Street, Landmark"
+                      value={formData.address1}
+                      onChange={(e) => setFormData(prev => ({...prev, address1: e.target.value}))}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="address2">{t('complaint.address2')} ({t('action.optional')})</Label>
+                    <Input
+                      id="address2"
+                      placeholder="Area, Locality"
+                      value={formData.address2}
+                      onChange={(e) => setFormData(prev => ({...prev, address2: e.target.value}))}
+                    />
+                  </div>
+                </>
+              )}
             </div>
 
             <div>
@@ -609,55 +755,6 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
           </CardContent>
         </Card>
 
-        {/* Location Dialog */}
-        <Dialog open={showLocationDialog} onOpenChange={setShowLocationDialog}>
-          <DialogContent>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                <Navigation className="h-5 w-5 text-civic-saffron" />
-                Are you at the issue location?
-              </DialogTitle>
-            </DialogHeader>
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                We can capture your exact GPS location to help authorities locate the issue precisely.
-              </p>
-              <div className="flex gap-2">
-                <Button 
-                  onClick={getCurrentLocation}
-                  disabled={isGettingLocation}
-                  className="flex-1"
-                >
-                  {isGettingLocation ? (
-                    <>
-                      <LoaderCircle className="h-4 w-4 mr-2 animate-spin" />
-                      Getting Location...
-                    </>
-                  ) : (
-                    <>
-                      <Navigation className="h-4 w-4 mr-2" />
-                      Yes, Get My Location
-                    </>
-                  )}
-                </Button>
-                <Button 
-                  variant="outline" 
-                  onClick={skipLocation}
-                  className="flex-1"
-                >
-                  Skip
-                </Button>
-              </div>
-              {location && (
-                <div className="bg-civic-green/10 p-3 rounded-lg">
-                  <p className="text-sm text-civic-green">
-                    ✓ Location captured: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}
-                  </p>
-                </div>
-              )}
-            </div>
-          </DialogContent>
-        </Dialog>
       </div>
     </div>
   )
