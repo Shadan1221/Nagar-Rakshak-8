@@ -500,9 +500,10 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
             <div>
               <Label>{t('complaint.media')} *</Label>
               <div className="border-2 border-dashed border-civic-saffron/30 rounded-lg p-4 text-center hover:border-civic-saffron/50 transition-colors">
+                {/* capture="environment" tells mobile browsers to open the rear camera directly */}
                 <input
                   type="file"
-                  accept="image/*;capture=camera"
+                  accept="image/*"
                   capture="environment"
                   onChange={handleMediaUpload}
                   className="hidden"
@@ -510,6 +511,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                   ref={cameraInputRef}
                   disabled={isAnalyzing}
                 />
+                {/* No capture attribute — opens file picker / gallery */}
                 <input
                   type="file"
                   accept="image/*"
@@ -525,13 +527,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                     variant="outline" 
                     size="sm" 
                     className="h-8 px-2"
-                    onClick={() => {
-                      if (cameraInputRef.current) {
-                        cameraInputRef.current.setAttribute('capture','environment')
-                        cameraInputRef.current.setAttribute('accept','image/*;capture=camera')
-                        cameraInputRef.current.click()
-                      }
-                    }}
+                    onClick={() => cameraInputRef.current?.click()}
                     disabled={isAnalyzing}
                   >
                     Camera
