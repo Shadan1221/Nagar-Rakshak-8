@@ -7,11 +7,11 @@ serve(async (req: Request) => {
     return new Response("ok", { headers: corsHeaders });
   }
 
-  const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY");
+  const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
 
   try {
-    if (!OPENROUTER_API_KEY) {
-      throw new Error("OPENROUTER_API_KEY secret is not set in Supabase. Run: supabase secrets set OPENROUTER_API_KEY=<your-key>");
+    if (!GROQ_API_KEY) {
+      throw new Error("GROQ_API_KEY secret is not set in Supabase. Run: supabase secrets set GROQ_API_KEY=<your-key>");
     }
 
     const { imageData, issueType } = await req.json();
@@ -39,16 +39,14 @@ Respond ONLY in JSON:
 1. For irrelevant images: {"is_relevant": false, "reason": "Image does not appear to be related."}
 2. For relevant images: {"is_relevant": true, "description": "YOUR_DESCRIPTION_HERE"}`;
 
-    const aiResponse = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const aiResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-        "HTTP-Referer": "https://nagarrakshak.netlify.app/",
-        "X-Title": "Nagar Rakshak",
+        "Authorization": `Bearer ${GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "google/gemma-3-27b-it",
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: [
           {
             role: "user",
@@ -63,8 +61,8 @@ Respond ONLY in JSON:
 
     if (!aiResponse.ok) {
       const errorText = await aiResponse.text();
-      console.error("OpenRouter API Error:", errorText);
-      throw new Error(`OpenRouter API failed with status ${aiResponse.status}: ${errorText}`);
+      console.error("Groq API Error:", errorText);
+      throw new Error(`Groq API failed with status ${aiResponse.status}: ${errorText}`);
     }
 
     const result = await aiResponse.json() as {
