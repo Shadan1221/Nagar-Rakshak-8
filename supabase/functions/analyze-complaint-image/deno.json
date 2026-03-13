@@ -1,6 +1,9 @@
 {
   "compilerOptions": {
-    "lib": ["esnext"],
+    "lib": ["esnext", "deno.ns"],
     "strict": true
+  },
+  "imports": {
+    "std/": "https://deno.land/std@0.168.0/"
   }
 }
