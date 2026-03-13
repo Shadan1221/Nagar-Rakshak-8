@@ -1,0 +1,22 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json ./
+
+# Install dependencies (including devDependencies for tsc)
+RUN npm ci
+
+# Copy source code
+COPY . .
+
+# Build the backend specifically
+# Using npx to ensure we use the project's typescript version
+RUN npx tsc -p supabase/functions/analyze-complaint-image/tsconfig.json
+
+# Expose the port
+EXPOSE 3000
+
+# Start the server
+CMD ["node", "supabase/functions/analyze-complaint-image/dist/index.js"]
