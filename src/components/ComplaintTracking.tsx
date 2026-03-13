@@ -4,22 +4,29 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ArrowLeft, Search, Clock, CheckCircle, User, MapPin, Phone } from "lucide-react"
+import { ArrowLeft, Search, Clock, CheckCircle, User, MapPin, Phone, Copy, Megaphone, Landmark } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/integrations/supabase/client"
 import { useLanguage } from "@/contexts/LanguageContext"
 
 interface ComplaintTrackingProps {
   onBack: () => void
+  initialComplaintId?: string
 }
 
-const ComplaintTracking = ({ onBack }: ComplaintTrackingProps) => {
+const ComplaintTracking = ({ onBack, initialComplaintId }: ComplaintTrackingProps) => {
   const { t } = useLanguage()
   const [searchId, setSearchId] = useState("")
   const [complaint, setComplaint] = useState<any>(null)
   const [statusUpdates, setStatusUpdates] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const { toast } = useToast()
+
+  useEffect(() => {
+    if (initialComplaintId) {
+      setSearchId(initialComplaintId.toUpperCase())
+    }
+  }, [initialComplaintId])
 
   useEffect(() => {
     if (complaint) {
@@ -139,6 +146,64 @@ const ComplaintTracking = ({ onBack }: ComplaintTrackingProps) => {
       case 'in progress': return 'bg-yellow-100 text-yellow-700 border-yellow-300'
       case 'resolved': return 'bg-civic-green/20 text-civic-green border-civic-green/30'
       default: return 'bg-muted text-muted-foreground'
+    }
+  }
+
+  const buildEscalationSummary = () => {
+    if (!complaint) return ""
+
+    const issue = complaint.issue_type || 'Civic issue'
+    const location = [complaint.city, complaint.state].filter(Boolean).join(', ')
+    const status = complaint.status || 'Pending'
+    const description = (complaint.description || '').replace(/\s+/g, ' ').trim()
+    const trimmedDescription = description.length > 130 ? `${description.slice(0, 130)}...` : description
+
+    const line1 = `Complaint ${complaint.complaint_code}: ${issue} in ${location} is still ${status}.`
+    const line2 = `${trimmedDescription || 'Issue is still unresolved.'} Please help resolve this civic issue urgently. #NagarRakshak`
+
+    return `${line1}\n${line2}`
+  }
+
+  const handleCopyForX = async () => {
+    const summary = buildEscalationSummary()
+    if (!summary) return
+
+    const tweetUrl = `https://x.com/intent/tweet?text=${encodeURIComponent(summary)}`
+    const xWindow = window.open('', '_blank', 'noopener,noreferrer')
+    let copied = false
+
+    try {
+      await navigator.clipboard.writeText(summary)
+      copied = true
+    } catch {
+      // Fallback for browsers that block clipboard API
+      const textArea = document.createElement('textarea')
+      textArea.value = summary
+      textArea.style.position = 'fixed'
+      textArea.style.opacity = '0'
+      document.body.appendChild(textArea)
+      textArea.focus()
+      textArea.select()
+      copied = document.execCommand('copy')
+      document.body.removeChild(textArea)
+    }
+
+    if (xWindow) {
+      xWindow.location.href = tweetUrl
+    } else {
+      window.location.href = tweetUrl
+    }
+
+    if (copied) {
+      toast({
+        title: "Summary copied",
+        description: "Complaint summary copied and X opened.",
+      })
+    } else {
+      toast({
+        title: "Opening X",
+        description: "X opened, but clipboard access was blocked. Please copy manually.",
+      })
     }
   }
 
@@ -317,6 +382,56 @@ const ComplaintTracking = ({ onBack }: ComplaintTrackingProps) => {
                       </Button>
                     )}
                   </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Escalation to X */}
+            {complaint.status !== 'Resolved' && (
+              <Card className="relative overflow-hidden border-2 border-civic-saffron/40 bg-gradient-to-br from-orange-50 via-amber-50 to-rose-50 shadow-sm">
+                <div className="pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full bg-civic-saffron/15 blur-2xl" />
+                <CardContent className="relative p-4 space-y-4">
+                  <div className="flex items-start gap-3">
+                    <div className="rounded-full bg-civic-saffron/15 p-2">
+                      <Megaphone className="h-5 w-5 text-civic-saffron" />
+                    </div>
+                    <div>
+                      <h4 className="font-semibold text-civic-saffron text-lg leading-tight">
+                        Is your issue not resolved yet?
+                      </h4>
+                      <p className="text-sm text-muted-foreground mt-1">
+                        Post it on X to highlight your issue to the authorities.
+                      </p>
+                      <p className="text-sm font-medium text-civic-saffron mt-1">
+                        Automatically tag the concerned authority with Civic Tag.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-civic-saffron/20 bg-white/65 px-3 py-2.5">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-muted-foreground">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Copy className="h-3.5 w-3.5 text-civic-saffron" />
+                        Copies your complaint summary
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Megaphone className="h-3.5 w-3.5 text-civic-saffron" />
+                        Opens the X composer
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Landmark className="h-3.5 w-3.5 text-civic-saffron" />
+                        Includes Civic Tag
+                      </span>
+                    </div>
+                  </div>
+
+                  <Button
+                    className="w-full bg-civic-saffron hover:bg-civic-saffron/90 text-white"
+                    onClick={handleCopyForX}
+                  >
+                    <Copy className="h-4 w-4 mr-2" />
+                    Copy Summary for X
+                  </Button>
                 </CardContent>
               </Card>
             )}

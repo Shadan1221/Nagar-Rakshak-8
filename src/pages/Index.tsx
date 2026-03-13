@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import SplashScreen from "../components/SplashScreen.tsx";
 import Dashboard from "../components/Dashboard.tsx";
 import ComplaintRegistration from "../components/ComplaintRegistration.tsx";
@@ -18,24 +19,51 @@ export const nextScreenAfterBack = (current: string): 'dashboard' | 'splash' => 
 };
 
 const Index = () => {
-  const [currentScreen, setCurrentScreen] = useState<string>('splash');
+  const navigate = useNavigate();
+  const location = useLocation();
   const [isAdminAuthed, setIsAdminAuthed] = useState<boolean>(false);
+
+  const pathToScreen: Record<string, string> = {
+    '/': 'splash',
+    '/login': 'login',
+    '/signup': 'signup',
+    '/dashboard': 'dashboard',
+    '/register': 'complaint',
+    '/track': 'tracking',
+    '/helpline': 'helpline',
+    '/admin': 'admin',
+  };
+
+  const screenToPath: Record<string, string> = {
+    splash: '/',
+    login: '/login',
+    signup: '/signup',
+    dashboard: '/dashboard',
+    complaint: '/register',
+    tracking: '/track',
+    helpline: '/helpline',
+    admin: '/admin',
+  };
+
+  const currentScreen = pathToScreen[location.pathname] || 'splash';
+  const trackedComplaintId = new URLSearchParams(location.search).get('complaintId') || '';
 
   useEffect(() => {
     setIsAdminAuthed(localStorage.getItem('nr_admin_auth') === 'true');
   }, []);
 
   const handleNavigation = (screen: string) => {
-    setCurrentScreen(screen);
+    navigate(screenToPath[screen] || '/');
   };
 
   const handleBack = () => {
-    setCurrentScreen(nextScreenAfterBack(currentScreen));
+    const nextScreen = nextScreenAfterBack(currentScreen);
+    navigate(screenToPath[nextScreen] || '/');
   };
 
   const handleLoginSuccess = (userRole: string) => {
     // Handle successful login - navigate to dashboard
-    setCurrentScreen('dashboard');
+    navigate('/dashboard');
   };
 
   const renderScreen = () => {
@@ -46,23 +74,23 @@ const Index = () => {
       case 'login':
         return (
           <AuthLogin 
-            onBack={() => setCurrentScreen('splash')} 
+            onBack={() => navigate('/')} 
             onSuccess={handleLoginSuccess}
-            onNavigateToSignup={() => setCurrentScreen('signup')}
+            onNavigateToSignup={() => navigate('/signup')}
           />
         );
 
       case 'signup':
-        return <Signup onBack={() => setCurrentScreen('splash')} onNavigate={handleNavigation} />;
+        return <Signup onBack={() => navigate('/')} onNavigate={handleNavigation} />;
 
       case 'dashboard':
         return <Dashboard onBack={handleBack} onNavigate={handleNavigation} />;
 
       case 'complaint':
-        return <ComplaintRegistration onBack={handleBack} />;
+        return <ComplaintRegistration onBack={handleBack} onTrackComplaint={(complaintId) => navigate(complaintId ? `/track?complaintId=${encodeURIComponent(complaintId)}` : '/track')} />;
 
       case 'tracking':
-        return <ComplaintTracking onBack={handleBack} />;
+        return <ComplaintTracking onBack={handleBack} initialComplaintId={trackedComplaintId} />;
 
       case 'helpline':
         return <HelplineNumbers onBack={handleBack} />;
@@ -70,7 +98,7 @@ const Index = () => {
       case 'admin':
         return isAdminAuthed
           ? <AdminPortal onBack={handleBack} />
-          : <AdminLogin onBack={() => setCurrentScreen('splash')} onSuccess={() => { setIsAdminAuthed(true); setCurrentScreen('admin'); }} />;
+          : <AdminLogin onBack={() => navigate('/')} onSuccess={() => { setIsAdminAuthed(true); navigate('/admin'); }} />;
 
       default:
         return <SplashScreen onNavigate={handleNavigation} />;

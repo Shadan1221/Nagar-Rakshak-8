@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle } from "lucide-react"
+import { ArrowLeft, Camera, MapPin, Send, CheckCircle, LoaderCircle, Copy } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { supabase } from "@/integrations/supabase/client"
 import { indianStates, getCitiesByState } from "@/data/indianStatesAndCities"
@@ -15,6 +15,7 @@ import { createComplaintNotifications } from "../services/notificationService"
 
 interface ComplaintRegistrationProps {
   onBack: () => void
+  onTrackComplaint?: (complaintId?: string) => void
 }
 
 type AiAnalysisResult = {
@@ -23,18 +24,16 @@ type AiAnalysisResult = {
   reason?: string
 }
 
-const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
+const ComplaintRegistration = ({ onBack, onTrackComplaint }: ComplaintRegistrationProps) => {
   const { t, language } = useLanguage()
   const [step, setStep] = useState<'form' | 'success'>('form')
+  const [locationFetchKey, setLocationFetchKey] = useState(0)
+  const [isLocating, setIsLocating] = useState(true)
   const [complaintId, setComplaintId] = useState<string>('')
   const { toast } = useToast()
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [location, setLocation] = useState<{lat: number, lng: number} | null>(null);
-  const [isGettingLocation, setIsGettingLocation] = useState(false);
-  const [showManualLocationFields, setShowManualLocationFields] = useState(false);
-  const [isLocationAutoFilled, setIsLocationAutoFilled] = useState(false);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<BlobPart[]>([])
   const cameraInputRef = useRef<HTMLInputElement | null>(null)
@@ -70,59 +69,155 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
   const cities = formData.state ? getCitiesByState(formData.state) : []
 
   const normalizeLocationToken = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
+  const stateAliasMap: Record<string, string> = {
+    uttrakhand: 'Uttarakhand',
+    uttaranchal: 'Uttarakhand',
+    nctofdelhi: 'Delhi',
+    delhinct: 'Delhi',
+    orissa: 'Odisha',
+  }
+  const stripStatePrefix = (value: string) => value
+    .replace(/^state of\s+/i, '')
+    .replace(/^union territory of\s+/i, '')
+    .replace(/^nct of\s+/i, '')
+    .trim()
+
+  const cleanCityCandidate = (value: string) => value
+    .replace(/\b(district|dist\.?|tehsil|taluk|taluka|subdistrict|mandal|block|division|municipal corporation|mc)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 
   const resolveStateName = (candidate: string) => {
-    const normalizedCandidate = normalizeLocationToken(candidate)
-    const exactMatch = states.find((state) => normalizeLocationToken(state) === normalizedCandidate)
-    if (exactMatch) return exactMatch
+    if (!candidate) return ''
 
-    return states.find((state) => {
-      const normalizedState = normalizeLocationToken(state)
-      return normalizedState.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedState)
-    }) || ''
+    const candidates = [candidate, stripStatePrefix(candidate)]
+      .map((value) => value.trim())
+      .filter(Boolean)
+
+    for (const candidateValue of candidates) {
+      const normalizedCandidate = normalizeLocationToken(candidateValue)
+      const aliasMatch = stateAliasMap[normalizedCandidate]
+      if (aliasMatch) return aliasMatch
+
+      const exactMatch = states.find((state) => normalizeLocationToken(state) === normalizedCandidate)
+      if (exactMatch) return exactMatch
+
+      const partialMatch = states.find((state) => {
+        const normalizedState = normalizeLocationToken(state)
+        return normalizedState.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedState)
+      })
+      if (partialMatch) return partialMatch
+    }
+
+    return ''
   }
 
   const resolveCityName = (state: string, candidate: string) => {
-    if (!state || !candidate) return ''
+    if (!candidate) return ''
+
+    const cleanedCandidate = cleanCityCandidate(candidate)
+    if (!cleanedCandidate) return ''
+    if (!state) return cleanedCandidate
 
     const availableCities = getCitiesByState(state)
-    const normalizedCandidate = normalizeLocationToken(candidate)
+    const normalizedCandidate = normalizeLocationToken(cleanedCandidate)
     const exactMatch = availableCities.find((city) => normalizeLocationToken(city) === normalizedCandidate)
     if (exactMatch) return exactMatch
 
-    return availableCities.find((city) => {
+    const partialMatch = availableCities.find((city) => {
       const normalizedCity = normalizeLocationToken(city)
       return normalizedCity.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedCity)
-    }) || ''
+    })
+
+    return partialMatch || ''
   }
+
+  const resolveCityFromCandidates = (state: string, candidates: Array<string | null | undefined>) => {
+    for (const candidate of candidates) {
+      if (!candidate) continue
+      const resolved = resolveCityName(state, candidate)
+      if (resolved) return resolved
+    }
+    return ''
+  }
+
+  const getCurrentPositionWithHighAccuracy = () =>
+    new Promise<GeolocationPosition>((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      })
+    })
 
   useEffect(() => {
     let isMounted = true
 
     const reverseGeocodeLocation = async (latitude: number, longitude: number) => {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`
+      let rawState = ''
+      const rawCityCandidates: string[] = []
+      let address1 = ''
+      let address2 = ''
+
+      const nominatimResponse = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${latitude}&lon=${longitude}&zoom=14&addressdetails=1&accept-language=en`
       )
 
-      if (!response.ok) {
-        throw new Error(`Reverse geocoding failed with status ${response.status}`)
+      if (nominatimResponse.ok) {
+        const nominatimResult = await nominatimResponse.json()
+        const nominatimAddress = nominatimResult?.address || {}
+
+        rawState = (nominatimAddress.state || nominatimAddress['state_district'] || nominatimAddress.region || '') as string
+        rawCityCandidates.push(
+          nominatimAddress.city,
+          nominatimAddress.town,
+          nominatimAddress.city_district,
+          nominatimAddress.county,
+          nominatimAddress.state_district,
+          nominatimAddress.municipality,
+          nominatimAddress.village,
+          nominatimAddress.hamlet
+        )
+        address1 = [nominatimAddress.house_number, nominatimAddress.road].filter(Boolean).join(', ')
+        address2 = [nominatimAddress.suburb, nominatimAddress.neighbourhood, nominatimAddress.postcode].filter(Boolean).join(', ')
       }
 
-      const geocodeResult = await response.json()
-      const address = geocodeResult?.address || {}
+      const preliminaryState = resolveStateName(rawState) || rawState.trim()
+      const preliminaryCity = resolveCityFromCandidates(preliminaryState, rawCityCandidates)
+      const shouldUseFallback = !rawState || !preliminaryCity
 
-      const rawState = (address.state || address['state_district'] || '') as string
-      const resolvedState = resolveStateName(rawState)
-      const rawCity = (address.city || address.town || address.village || address.municipality || address.county || '') as string
-      const resolvedCity = resolveCityName(resolvedState, rawCity)
-      const district = (address.state_district || address.county || '') as string
-      const address1 = [address.house_number, address.road].filter(Boolean).join(', ')
-      const address2 = [address.suburb, address.neighbourhood, address.postcode].filter(Boolean).join(', ')
+      if (shouldUseFallback) {
+        const fallbackResponse = await fetch(
+          `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${latitude}&longitude=${longitude}&localityLanguage=en`
+        )
+
+        if (fallbackResponse.ok) {
+          const fallbackResult = await fallbackResponse.json()
+          const fallbackState = (fallbackResult?.principalSubdivision || fallbackResult?.localityInfo?.administrative?.[1]?.name || '') as string
+          const fallbackCityCandidates: Array<string | null | undefined> = [
+            fallbackResult?.city,
+            fallbackResult?.locality,
+            fallbackResult?.localityInfo?.administrative?.[2]?.name,
+            fallbackResult?.localityInfo?.administrative?.[3]?.name,
+          ]
+
+          for (const adminEntry of fallbackResult?.localityInfo?.administrative || []) {
+            fallbackCityCandidates.push(adminEntry?.name)
+          }
+
+          rawState = rawState || fallbackState
+          rawCityCandidates.push(...fallbackCityCandidates as string[])
+
+          address2 = address2 || [fallbackResult?.locality, fallbackResult?.postcode].filter(Boolean).join(', ')
+        }
+      }
+
+      const resolvedState = resolveStateName(rawState) || rawState.trim()
+      const resolvedCity = resolveCityFromCandidates(resolvedState, rawCityCandidates)
 
       return {
         resolvedState,
         resolvedCity,
-        district,
         address1,
         address2,
       }
@@ -131,8 +226,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     const autoFillLocation = async () => {
       if (!navigator.geolocation) {
         if (!isMounted) return
-        setShowManualLocationFields(true)
-        setIsLocationAutoFilled(false)
+        setIsLocating(false)
         toast({
           title: "Location not supported",
           description: "Your browser does not support location. Please fill location manually.",
@@ -141,76 +235,64 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
         return
       }
 
-      setIsGettingLocation(true)
+      if (isMounted) setIsLocating(true)
 
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
+      try {
+        const position = await getCurrentPositionWithHighAccuracy()
+        if (!isMounted) return
+
+        const { latitude, longitude } = position.coords
+
+        try {
+          const geocoded = await reverseGeocodeLocation(latitude, longitude)
           if (!isMounted) return
 
-          const { latitude, longitude } = position.coords
-          setLocation({ lat: latitude, lng: longitude })
+          setFormData((prev) => ({
+            ...prev,
+            state: geocoded.resolvedState || prev.state,
+            city: geocoded.resolvedCity || prev.city,
+            address1: geocoded.address1 || prev.address1,
+            address2: geocoded.address2 || prev.address2,
+            gpsLatitude: latitude,
+            gpsLongitude: longitude,
+          }))
 
-          try {
-            const geocoded = await reverseGeocodeLocation(latitude, longitude)
-            if (!isMounted) return
+          const hasRequiredLocation = Boolean((geocoded.resolvedState || '').trim() && (geocoded.resolvedCity || '').trim())
 
-            setFormData((prev) => ({
-              ...prev,
-              state: geocoded.resolvedState || prev.state,
-              city: geocoded.resolvedCity || prev.city,
-              district: geocoded.district || prev.district,
-              address1: geocoded.address1 || prev.address1,
-              address2: geocoded.address2 || prev.address2,
-              gpsLatitude: latitude,
-              gpsLongitude: longitude,
-            }))
-
-            const hasRequiredLocation = Boolean(geocoded.resolvedState && geocoded.resolvedCity)
-            setIsLocationAutoFilled(hasRequiredLocation)
-            setShowManualLocationFields(!hasRequiredLocation)
-
-            toast({
-              title: hasRequiredLocation ? "Location auto-filled" : "Complete location manually",
-              description: hasRequiredLocation
-                ? "State and city were filled from your current location."
-                : "We got GPS coordinates but could not map full address. Please fill state and city manually.",
-              variant: hasRequiredLocation ? "default" : "destructive"
-            })
-          } catch (error) {
-            console.error('Reverse geocoding error:', error)
-            if (!isMounted) return
-
-            setFormData((prev) => ({
-              ...prev,
-              gpsLatitude: latitude,
-              gpsLongitude: longitude,
-            }))
-            setIsLocationAutoFilled(false)
-            setShowManualLocationFields(true)
-            toast({
-              title: "Could not auto-fill address",
-              description: "GPS was captured but address lookup failed. Please fill location manually.",
-              variant: "destructive"
-            })
-          } finally {
-            if (isMounted) setIsGettingLocation(false)
-          }
-        },
-        (error) => {
-          console.error('Geolocation error:', error)
-          if (!isMounted) return
-
-          setIsGettingLocation(false)
-          setIsLocationAutoFilled(false)
-          setShowManualLocationFields(true)
           toast({
-            title: "Location permission needed",
-            description: "Please allow location access, or fill location manually below.",
+            title: hasRequiredLocation ? "Location fetched" : "Location partially fetched",
+            description: hasRequiredLocation
+              ? "State, city and GPS coordinates were fetched automatically."
+              : "GPS coordinates were fetched, but state/city mapping is incomplete. Please verify and update manually.",
+            variant: hasRequiredLocation ? "default" : "destructive"
+          })
+        } catch (error) {
+          console.error('Reverse geocoding error:', error)
+          if (!isMounted) return
+
+          setFormData((prev) => ({
+            ...prev,
+            gpsLatitude: latitude,
+            gpsLongitude: longitude,
+          }))
+          toast({
+            title: "Location partially fetched",
+            description: "GPS coordinates were fetched, but address lookup failed. Please fill state and city manually.",
             variant: "destructive"
           })
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
-      )
+        }
+      } catch (error) {
+        console.error('Geolocation error:', error)
+        if (!isMounted) return
+
+        toast({
+          title: "Location permission needed",
+          description: "Please allow location access, or fill location manually below.",
+          variant: "destructive"
+        })
+      } finally {
+        if (isMounted) setIsLocating(false)
+      }
     }
 
     autoFillLocation()
@@ -218,7 +300,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     return () => {
       isMounted = false
     }
-  }, [toast])
+  }, [locationFetchKey])
 
   const mapAuthorityForIssue = (issue: string): string | null => {
     const normalized = (issue || '').toLowerCase()
@@ -241,6 +323,33 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     if (!data || typeof data !== 'object') throw new Error('Invalid response from AI function')
 
     return data as AiAnalysisResult
+  }
+
+  const handleCopyComplaintId = async () => {
+    if (!complaintId) return
+
+    try {
+      await navigator.clipboard.writeText(complaintId)
+      toast({
+        title: "Complaint ID copied",
+        description: `${complaintId} copied to clipboard.`,
+      })
+    } catch {
+      const textArea = document.createElement('textarea')
+      textArea.value = complaintId
+      textArea.style.position = 'fixed'
+      textArea.style.opacity = '0'
+      document.body.appendChild(textArea)
+      textArea.focus()
+      textArea.select()
+      document.execCommand('copy')
+      document.body.removeChild(textArea)
+
+      toast({
+        title: "Complaint ID copied",
+        description: `${complaintId} copied to clipboard.`,
+      })
+    }
   }
 
 
@@ -355,8 +464,15 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
         })
         return
       }
+    if (isLocating && (!formData.state || !formData.city)) {
+        toast({
+          title: "Fetching location",
+          description: "Please wait a moment while we auto-fill your location.",
+          variant: "default"
+        })
+        return
+      }
     if (!formData.state || !formData.city) {
-        setShowManualLocationFields(true)
         toast({
           title: "Location Required",
           description: "We could not auto-fill full location. Please fill state and city manually.",
@@ -467,7 +583,19 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
 
               <div className="bg-civic-green/10 rounded-lg p-4 mb-6">
                 <p className="text-sm text-muted-foreground mb-2">{t('complaint.id')}</p>
-                <p className="text-2xl font-bold text-civic-green font-mono">{complaintId}</p>
+                <div className="flex items-center justify-center gap-2">
+                  <p className="text-2xl font-bold text-civic-green font-mono">{complaintId}</p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 text-civic-green hover:bg-civic-green/10"
+                    onClick={handleCopyComplaintId}
+                    aria-label="Copy complaint ID"
+                  >
+                    <Copy className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
 
               <div className="bg-gradient-to-r from-civic-saffron/10 to-civic-green/10 rounded-lg p-4 mb-6">
@@ -484,7 +612,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                   variant="default"
                   size="lg" 
                   className="w-full"
-                  onClick={() => onBack()}
+                  onClick={() => (onTrackComplaint ? onTrackComplaint(complaintId) : onBack())}
                 >
                   {t('dashboard.trackComplaint')}
                 </Button>
@@ -508,6 +636,7 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                       gpsLatitude: null,
                       gpsLongitude: null
                     })
+                    setLocationFetchKey((prev) => prev + 1)
                   }}
                 >
                   {t('dashboard.registerComplaint')}
@@ -560,87 +689,61 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="rounded-md border border-civic-saffron/20 bg-civic-saffron/5 p-3 text-sm">
-                <p className="font-medium text-foreground">Location</p>
-                {isGettingLocation ? (
-                  <p className="mt-1 text-muted-foreground">Fetching your location automatically...</p>
-                ) : isLocationAutoFilled ? (
-                  <p className="mt-1 text-civic-green">Auto-filled: {formData.city}, {formData.state}</p>
-                ) : (
-                  <p className="mt-1 text-muted-foreground">Could not auto-fill full location. Please fill manually below.</p>
-                )}
-                {location && (
-                  <p className="mt-1 text-xs text-muted-foreground">GPS: {location.lat.toFixed(6)}, {location.lng.toFixed(6)}</p>
-                )}
-                <Button
-                  type="button"
-                  variant="link"
-                  className="h-auto px-0 text-civic-saffron"
-                  onClick={() => setShowManualLocationFields((prev) => !prev)}
-                >
-                  {showManualLocationFields ? 'Hide manual location fields' : 'Edit location manually'}
-                </Button>
+              <div>
+                <Label htmlFor="state">{t('complaint.state')} *</Label>
+                <Select disabled={isLocating} value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value, city: ''}))}>
+                  <SelectTrigger id="state">
+                    <SelectValue placeholder={isLocating ? "Fetching location..." : "Select your state"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {states.map(state => (
+                      <SelectItem key={state} value={state}>{state}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
-              {showManualLocationFields && (
-                <>
-                  <div>
-                    <Label htmlFor="state">{t('complaint.state')} *</Label>
-                    <Select value={formData.state} onValueChange={(value) => setFormData(prev => ({...prev, state: value, city: ''}))}>
-                      <SelectTrigger id="state">
-                        <SelectValue placeholder="Select your state" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {states.map(state => (
-                          <SelectItem key={state} value={state}>{state}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
+              <div>
+                <Label htmlFor="city">{t('complaint.city')} *</Label>
+                <Select disabled={isLocating} value={formData.city} onValueChange={(value) => setFormData(prev => ({...prev, city: value}))}>
+                  <SelectTrigger id="city">
+                    <SelectValue placeholder={isLocating ? "Fetching location..." : (formData.state ? "Select your city" : "Select state first")} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {cities.map(city => (
+                      <SelectItem key={city} value={city}>{city}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-                  <div>
-                    <Label htmlFor="city">{t('complaint.city')} *</Label>
-                    <Select value={formData.city} onValueChange={(value) => setFormData(prev => ({...prev, city: value}))}>
-                      <SelectTrigger id="city">
-                        <SelectValue placeholder={formData.state ? "Select your city" : "Select state first"} />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {cities.map(city => (
-                          <SelectItem key={city} value={city}>{city}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-
-                  <div>
-                    <Label htmlFor="district">{t('complaint.district')} ({t('action.optional')})</Label>
-                    <Input
-                      id="district"
-                      placeholder="Enter district (optional)"
-                      value={formData.district}
-                      onChange={(e) => setFormData(prev => ({...prev, district: e.target.value}))}
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="address1">{t('complaint.address1')} ({t('action.optional')})</Label>
-                    <Input
-                      id="address1"
-                      placeholder="House no., Street, Landmark"
-                      value={formData.address1}
-                      onChange={(e) => setFormData(prev => ({...prev, address1: e.target.value}))}
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="address2">{t('complaint.address2')} ({t('action.optional')})</Label>
-                    <Input
-                      id="address2"
-                      placeholder="Area, Locality"
-                      value={formData.address2}
-                      onChange={(e) => setFormData(prev => ({...prev, address2: e.target.value}))}
-                    />
-                  </div>
-                </>
-              )}
+              <div>
+                <Label htmlFor="district">{t('complaint.district')} ({t('action.optional')})</Label>
+                <Input
+                  id="district"
+                  placeholder="Enter district (optional)"
+                  value={formData.district}
+                  onChange={(e) => setFormData(prev => ({...prev, district: e.target.value}))}
+                />
+              </div>
+              <div>
+                <Label htmlFor="address1">{t('complaint.address1')} ({t('action.optional')})</Label>
+                <Input
+                  id="address1"
+                  placeholder="House no., Street, Landmark"
+                  value={formData.address1}
+                  onChange={(e) => setFormData(prev => ({...prev, address1: e.target.value}))}
+                />
+              </div>
+              <div>
+                <Label htmlFor="address2">{t('complaint.address2')} ({t('action.optional')})</Label>
+                <Input
+                  id="address2"
+                  placeholder="Area, Locality"
+                  value={formData.address2}
+                  onChange={(e) => setFormData(prev => ({...prev, address2: e.target.value}))}
+                />
+              </div>
             </div>
 
             <div>
