@@ -9,13 +9,7 @@
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
-    "docker:up": "docker-compose up --build",
-    "docker:down": "docker-compose down",
-    "docker:logs": "docker-compose logs -f",
-    "docker:logs:frontend": "docker-compose logs -f frontend",
-    "docker:logs:backend": "docker-compose logs -f backend",
-    "backend:ts": "ts-node supabase/functions/analyze-complaint-image/index.ts",
-    "backend:js": "node supabase/functions/analyze-complaint-image/dist/index.js"
+    "functions:deploy": "supabase functions deploy analyze-complaint-image --no-verify-jwt"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

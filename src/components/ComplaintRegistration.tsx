@@ -83,59 +83,15 @@ const ComplaintRegistration = ({ onBack }: ComplaintRegistrationProps) => {
     return null
   }
 
-  const resolveAiAnalysisEndpoint = () => {
-    const explicitEndpoint = (import.meta.env.VITE_AI_ANALYSIS_ENDPOINT as string | undefined)?.trim()
-    if (explicitEndpoint) return explicitEndpoint
-
-    const apiBase = ((import.meta.env.VITE_AI_API_URL as string | undefined) || (import.meta.env.VITE_API_URL as string | undefined))?.trim()
-    if (apiBase) return `${apiBase.replace(/\/+$/, '')}/analyze-image`
-
-    if (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
-      return 'http://localhost:3000/analyze-image'
-    }
-
-    return null
-  }
-
   const analyzeComplaintImage = async (imageData: string, issueType: string): Promise<AiAnalysisResult> => {
-    const failures: string[] = []
-    const endpoint = resolveAiAnalysisEndpoint()
+    const { data, error } = await supabase.functions.invoke('analyze-complaint-image', {
+      body: { imageData, issueType },
+    })
 
-    if (endpoint) {
-      try {
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ imageData, issueType }),
-        })
+    if (error) throw new Error(error.message)
+    if (!data || typeof data !== 'object') throw new Error('Invalid response from AI function')
 
-        if (!response.ok) {
-          const errorText = await response.text()
-          throw new Error(errorText || `HTTP ${response.status}`)
-        }
-
-        return await response.json()
-      } catch (error) {
-        failures.push(error instanceof Error ? error.message : 'Unknown HTTP endpoint error')
-      }
-    }
-
-    try {
-      const { data, error } = await supabase.functions.invoke('analyze-complaint-image', {
-        body: { imageData, issueType },
-      })
-
-      if (error) throw new Error(error.message)
-      if (!data || typeof data !== 'object') throw new Error('Invalid response from AI function')
-
-      return data as AiAnalysisResult
-    } catch (error) {
-      failures.push(error instanceof Error ? error.message : 'Unknown Supabase function error')
-    }
-
-    throw new Error(`Could not reach AI service. ${failures.join(' | ')}`)
+    return data as AiAnalysisResult
   }
 
 
